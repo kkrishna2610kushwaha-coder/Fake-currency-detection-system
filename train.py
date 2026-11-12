@@ -1,126 +1,233 @@
 
 import tensorflow as tf
-import matplotlib.pyplot as plt
-import json
+import numpy as np
 import os
 
-# Project settings
-IMAGE_SIZE = (224, 224)
-BATCH_SIZE = 16
-EPOCHS = 15
+from pathlib import Path
+from tensorflow.keras import layers, models
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+
+# --------------------------------
+# PROJECT CONFIGURATION
+# --------------------------------
+
+PROJECT_NAME = "Fake Currency Detection System"
 
 DATASET_PATH = "dataset"
+MODEL_PATH = "currency_model.keras"
 
-# Load training dataset
-train_data = tf.keras.utils.image_dataset_from_directory(
+IMAGE_SIZE = (224, 224)
+BATCH_SIZE = 16
+EPOCHS = 20
+
+print("=" * 50)
+print(PROJECT_NAME)
+print("CNN Model Training Started")
+print("=" * 50)
+
+# --------------------------------
+# CHECK DATASET
+# --------------------------------
+
+fake_folder = Path(DATASET_PATH) / "fake"
+genuine_folder = Path(DATASET_PATH) / "genuine"
+
+if not fake_folder.exists() or not genuine_folder.exists():
+    raise FileNotFoundError(
+        "Dataset folders missing! Create dataset/fake "
+        "and dataset/genuine first."
+    )
+
+fake_count = len(list(fake_folder.glob("*")))
+genuine_count = len(list(genuine_folder.glob("*")))
+
+print("Fake images:", fake_count)
+print("Genuine images:", genuine_count)
+
+if fake_count < 2 or genuine_count < 2:
+    raise ValueError(
+        "Add at least 2 images in each class to begin training."
+    )
+
+# --------------------------------
+# LOAD DATASET
+# --------------------------------
+
+train_dataset = tf.keras.utils.image_dataset_from_directory(
     DATASET_PATH,
-    validation_split=0.2,
+    validation_split=0.20,
     subset="training",
     seed=123,
     image_size=IMAGE_SIZE,
     batch_size=BATCH_SIZE,
-    label_mode="binary"
+    label_mode="binary",
+    class_names=["fake", "genuine"]
 )
 
-# Load validation dataset
-val_data = tf.keras.utils.image_dataset_from_directory(
+validation_dataset = tf.keras.utils.image_dataset_from_directory(
     DATASET_PATH,
-    validation_split=0.2,
+    validation_split=0.20,
     subset="validation",
     seed=123,
     image_size=IMAGE_SIZE,
     batch_size=BATCH_SIZE,
-    label_mode="binary"
+    label_mode="binary",
+    class_names=["fake", "genuine"]
 )
 
-class_names = train_data.class_names
+print("Class Names:", train_dataset.class_names)
+print("0 = Fake")
+print("1 = Genuine")
 
-print("Classes:", class_names)
+# --------------------------------
+# IMAGE NORMALIZATION
+# --------------------------------
 
-if class_names != ["fake", "genuine"]:
-    raise ValueError(
-        "Dataset folders must be named fake and genuine."
-    )
+normalization_layer = layers.Rescaling(1.0 / 255)
 
-# Improve dataset performance
+train_dataset = train_dataset.map(
+    lambda x, y: (normalization_layer(x), y)
+)
+
+validation_dataset = validation_dataset.map(
+    lambda x, y: (normalization_layer(x), y)
+)
+
 AUTOTUNE = tf.data.AUTOTUNE
 
-train_data = train_data.prefetch(AUTOTUNE)
-val_data = val_data.prefetch(AUTOTUNE)
+train_dataset = train_dataset.prefetch(
+    buffer_size=AUTOTUNE
+)
 
-# Data augmentation
-augmentation = tf.keras.Sequential([
-    tf.keras.layers.RandomFlip("horizontal"),
-    tf.keras.layers.RandomRotation(0.05),
-    tf.keras.layers.RandomZoom(0.1)
+validation_dataset = validation_dataset.prefetch(
+    buffer_size=AUTOTUNE
+)
+
+# --------------------------------
+# CNN MODEL ARCHITECTURE
+# --------------------------------
+
+model = models.Sequential([
+
+    layers.Input(shape=(224, 224, 3)),
+
+    # Data Augmentation
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.05),
+    layers.RandomZoom(0.10),
+
+    # First Convolution Block
+    layers.Conv2D(
+        32,
+        (3, 3),
+        activation="relu"
+    ),
+    layers.MaxPooling2D((2, 2)),
+
+    # Second Convolution Block
+    layers.Conv2D(
+        64,
+        (3, 3),
+        activation="relu"
+    ),
+    layers.MaxPooling2D((2, 2)),
+
+    # Third Convolution Block
+    layers.Conv2D(
+        128,
+        (3, 3),
+        activation="relu"
+    ),
+    layers.MaxPooling2D((2, 2)),
+
+    # Fourth Convolution Block
+    layers.Conv2D(
+        128,
+        (3, 3),
+        activation="relu"
+    ),
+    layers.MaxPooling2D((2, 2)),
+
+    # Flatten Layer
+    layers.Flatten(),
+
+    # Fully Connected Layers
+    layers.Dense(128, activation="relu"),
+
+    layers.Dropout(0.5),
+
+    # Output Layer
+    layers.Dense(1, activation="sigmoid")
 ])
 
-# CNN Model
-model = tf.keras.Sequential([
-    tf.keras.layers.Input(shape=(224, 224, 3)),
+# --------------------------------
+# COMPILE MODEL
+# --------------------------------
 
-    augmentation,
-
-    tf.keras.layers.Rescaling(1./255),
-
-    tf.keras.layers.Conv2D(
-        32, (3, 3), activation="relu"
-    ),
-    tf.keras.layers.MaxPooling2D(),
-
-    tf.keras.layers.Conv2D(
-        64, (3, 3), activation="relu"
-    ),
-    tf.keras.layers.MaxPooling2D(),
-
-    tf.keras.layers.Conv2D(
-        128, (3, 3), activation="relu"
-    ),
-    tf.keras.layers.MaxPooling2D(),
-
-    tf.keras.layers.Flatten(),
-
-    tf.keras.layers.Dense(128, activation="relu"),
-    tf.keras.layers.Dropout(0.4),
-
-    tf.keras.layers.Dense(1, activation="sigmoid")
-])
-
-# Compile model
 model.compile(
     optimizer="adam",
     loss="binary_crossentropy",
     metrics=["accuracy"]
 )
 
-# Model summary
+print("\nCNN Model Summary:")
+
 model.summary()
 
-# Train model
+# --------------------------------
+# TRAINING CALLBACKS
+# --------------------------------
+
+callbacks = [
+
+    EarlyStopping(
+        monitor="val_loss",
+        patience=5,
+        restore_best_weights=True
+    ),
+
+    ModelCheckpoint(
+        MODEL_PATH,
+        monitor="val_loss",
+        save_best_only=True
+    )
+]
+
+# --------------------------------
+# START MODEL TRAINING
+# --------------------------------
+
+print("\nTraining Started...")
+
 history = model.fit(
-    train_data,
-    validation_data=val_data,
-    epochs=EPOCHS
+    train_dataset,
+    validation_data=validation_dataset,
+    epochs=EPOCHS,
+    callbacks=callbacks
 )
 
-# Save trained model
-model.save("currency_model.keras")
+# --------------------------------
+# SAVE TRAINED MODEL
+# --------------------------------
 
-# Save class names
-with open("classes.json", "w") as file:
-    json.dump(class_names, file)
+model.save(MODEL_PATH)
 
-# Plot accuracy
-plt.figure(figsize=(8, 5))
+print("\n" + "=" * 50)
+print("TRAINING COMPLETED SUCCESSFULLY!")
+print("=" * 50)
 
-plt.plot(history.history["accuracy"], label="Training Accuracy")
-plt.plot(history.history["val_accuracy"], label="Validation Accuracy")
+print("Model Saved:", MODEL_PATH)
 
-plt.title("CNN Model Accuracy")
-plt.xlabel("Epochs")
-plt.ylabel("Accuracy")
-plt.legend()
-plt.savefig("training_history.png")
+print(
+    "Final Training Accuracy:",
+    round(history.history["accuracy"][-1] * 100, 2),
+    "%"
+)
 
-print("AI Model Training Completed!")
-print("Model saved successfully!")
+print(
+    "Final Validation Accuracy:",
+    round(history.history["val_accuracy"][-1] * 100, 2),
+    "%"
+)
+
+print("\nYour CNN Model is Ready!")
